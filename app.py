@@ -1,7 +1,7 @@
 """
 AQG — Automatic Question Generator
 Single-page UX: Upload → Popup → Quiz (one by one)
-Kelompok: Farros Rifantiarno R. | Naia Syafina H. | Onalla Aldeanuva
+Kelompok: Naia Syafina H. | Onalla Aldeanuva
 """
 
 import os, re, io, random, warnings
@@ -66,7 +66,6 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     members = [
-        ("Farros Rifantiarno R.", "A11.2024.15694"),
         ("Naia Syafina H.",       "A11.2024.15554"),
         ("Onalla Aldeanuva",      "A11.2024.15952"),
     ]
@@ -723,7 +722,6 @@ st.markdown("""
 <div class="hero">
     <div class="hero-eyebrow">✦ Automatic Question Generation · 2026</div>
     <h1 class="hero-title">Dari teks kuliah<br>ke pertanyaan <em>bermakna</em></h1>
-    <p class="hero-sub">Fine-tuned IndoT5 · Pipeline preprocessing 9 tahap · IDK-MRC</p>
 </div>
 """, unsafe_allow_html=True)
 
