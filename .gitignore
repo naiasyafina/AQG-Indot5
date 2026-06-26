@@ -1,30 +1,57 @@
-# Virtual Environment
+# ── Virtual Environment ────────────────────────────────────────
 venv/
 .venv/
 env/
+.env/
 
-# Python cache
+# ── Python Cache ───────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
 
-# Streamlit secrets (berisi token/API key)
+# ── Secrets & API Keys ─────────────────────────────────────────
+# JANGAN pernah commit file ini ke repo publik
+.env
 .streamlit/secrets.toml
 
-# VS Code
-.vscode/
+# ── Model Files (besar, didownload otomatis dari HuggingFace) ──
+model/
+models/
+*.bin
+*.safetensors
+*.ckpt
 
-# Environment variables
-.env
+# ── Output & Debug ─────────────────────────────────────────────
+outputs/
+debug_outputs/
+*.zip
+*.log
 
-# Jupyter
+# ── Data Files ─────────────────────────────────────────────────
+*.csv
+*.json
+!requirements.txt
+!*.example.json
+
+# ── Notebook Checkpoints ───────────────────────────────────────
 .ipynb_checkpoints/
 
-# Build files
-build/
-dist/
-*.egg-info/
-
-# OS files
+# ── OS Files ───────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── IDE ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── HuggingFace Cache ──────────────────────────────────────────
+.cache/
+huggingface/
