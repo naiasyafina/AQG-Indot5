@@ -4,9 +4,10 @@ Single-page UX: Upload → Popup → Quiz (one by one)
 Kelompok: Naia Syafina H. | Onalla Aldeanuva
 """
 
-import os, re, io, random, warnings
+import os, re, io, random, warnings, json
 import streamlit as st
 import torch
+from groq import Groq
 
 warnings.filterwarnings("ignore")
 
@@ -265,11 +266,17 @@ div[data-testid="stRadio"] > div           { gap:9px !important; flex-direction:
 div[data-testid="stRadio"] > div > label {
     background:var(--bg-card) !important;
     border:1.5px solid var(--border) !important;
-    border-radius:10px !important; padding:0.82rem 1.1rem !important;
+    border-radius:10px !important;
+    padding:0.82rem 1.1rem !important;
     cursor:pointer !important;
     transition:border-color 0.15s, background 0.15s !important;
-    color:var(--text-dark) !important; font-size:0.88rem !important;
+    color:var(--text-dark) !important;
+    font-size:0.88rem !important;
     width:100% !important;
+    min-height:54px !important;
+    display:flex !important;
+    align-items:center !important;
+    box-sizing:border-box !important;
 }
 div[data-testid="stRadio"] > div > label:hover {
     border-color:var(--blue-500) !important;
@@ -278,7 +285,12 @@ div[data-testid="stRadio"] > div > label:hover {
 div[data-testid="stRadio"] > div > label[data-checked="true"] {
     border-color:var(--blue-700) !important;
     background:var(--blue-50) !important;
-    color:var(--blue-700) !important; font-weight:600 !important;
+    color:var(--blue-700) !important;
+    font-weight:600 !important;
+}
+/* Sembunyikan opsi placeholder (index 0 = string kosong) */
+div[data-testid="stRadio"] > div > label:first-child {
+    display:none !important;
 }
 
 /* ── RESULT ── */
@@ -548,6 +560,142 @@ def load_model():
         return None, None, str(e)
 
 
+_GROQ_MODEL = "qwen/qwen3.6-27b"
+
+
+def get_groq_client():
+    """
+    Inisialisasi Groq client dari environment variable atau st.secrets.
+    Tidak di-cache dengan @st.cache_resource agar API key selalu dibaca fresh.
+    """
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
+        try:
+            api_key = st.secrets.get("GROQ_API_KEY", "")
+        except Exception:
+            pass
+    if not api_key:
+        return None, "GROQ_API_KEY tidak ditemukan. Set via environment variable atau .streamlit/secrets.toml"
+    return Groq(api_key=api_key), None
+
+
+def _call_groq(prompt: str, max_tokens: int = 400) -> str | None:
+    """
+    Helper: kirim prompt ke Groq dan return teks response.
+    Return None kalau gagal.
+    Qwen3 pakai reasoning_effort='none' agar tidak emit <think>...</think> tags
+    dan langsung return JSON — lebih cepat dan tidak perlu di-strip.
+    """
+    client, err = get_groq_client()
+    if client is None:
+        return None
+    try:
+        resp = client.chat.completions.create(
+            model=_GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=max_tokens,
+            reasoning_effort="none",   # non-thinking mode → output langsung
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return None
+
+
+def _parse_json_safe(raw: str) -> dict | None:
+    """Parse JSON dengan fallback strip markdown fence."""
+    if raw is None:
+        return None
+    try:
+        cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
+        # Hapus thinking tags kalau masih ada
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+        return json.loads(cleaned)
+    except Exception:
+        return None
+
+
+def generate_answer_with_llm(question: str, anchor: str, context: str) -> str | None:
+    """
+    Tahap 1 — Generate jawaban benar via Groq Qwen3.
+
+    'anchor' adalah kalimat dari pick_answer() yang dipakai IndoT5 generate question.
+    Dipakai sebagai petunjuk topik ke LLM, bukan sebagai jawaban final.
+
+    Prompt dirancang agar:
+    - Jawaban faktual berdasarkan konteks dokumen (bukan pengetahuan umum)
+    - Maksimal 20 kata → konsisten dengan panjang distractor
+    - Tidak mengulang kalimat pertanyaan
+    """
+    prompt = f"""Kamu adalah asisten akademik yang membaca dokumen dan menjawab pertanyaan secara tepat.
+
+Konteks dari dokumen:
+\"\"\"{context[:500]}\"\"\"
+
+Pertanyaan: {question}
+Petunjuk topik: {anchor[:150]}
+
+Tugas:
+Berikan jawaban yang BENAR dan FAKTUAL berdasarkan konteks di atas.
+Syarat:
+- Maksimal 20 kata
+- Berdasarkan isi konteks, bukan pengetahuan umum
+- Berbentuk frasa atau kalimat lengkap
+- Tidak mengulang kata-kata dari kalimat pertanyaan secara verbatim
+
+Balas HANYA dengan JSON (tanpa penjelasan, tanpa markdown):
+{{"answer": "jawaban di sini"}}"""
+
+    raw  = _call_groq(prompt, max_tokens=150)
+    data = _parse_json_safe(raw)
+    if data and isinstance(data.get("answer"), str) and data["answer"].strip():
+        return data["answer"].strip()
+    return None
+
+
+def generate_distractors_with_llm(question: str, correct: str, context: str) -> list | None:
+    """
+    Tahap 2 — Generate 3 distractor via Groq Qwen3.
+
+    Dipanggil SETELAH jawaban benar sudah pasti, sehingga distractor bisa
+    dikontraskan langsung dengan jawaban benar yang konkret.
+
+    Prompt dirancang agar:
+    - Distractor relevan secara semantik (dari domain yang sama)
+    - Tidak pakai negasi eksplisit ("bukan", "tidak") — terlalu mudah ditebak
+    - Panjang mirip jawaban benar (±5 kata)
+    - Tidak terlalu mirip satu sama lain
+    """
+    prompt = f"""Kamu adalah pembuat soal pilihan ganda Bahasa Indonesia yang ahli.
+
+Konteks dari dokumen:
+\"\"\"{context[:500]}\"\"\"
+
+Pertanyaan: {question}
+Jawaban benar: {correct}
+
+Tugas:
+Buat 3 pilihan jawaban yang SALAH tapi MENGECOH.
+Syarat setiap distractor:
+- Salah secara faktual berdasarkan konteks
+- Terdengar masuk akal dan relevan dengan topik
+- Panjang mirip jawaban benar (±5 kata)
+- Menggunakan kosakata dari konteks yang sama
+- JANGAN gunakan kata "bukan", "tidak", atau negasi eksplisit lainnya
+- Ketiga distractor harus berbeda satu sama lain
+
+Balas HANYA dengan JSON (tanpa penjelasan, tanpa markdown):
+{{"distractors": ["distractor1", "distractor2", "distractor3"]}}"""
+
+    raw  = _call_groq(prompt, max_tokens=250)
+    data = _parse_json_safe(raw)
+    if data and isinstance(data.get("distractors"), list):
+        result = [d.strip() for d in data["distractors"] if isinstance(d, str) and d.strip()]
+        if len(result) >= 1:
+            return result[:3]
+    return None
+
+
 def _get_focused_context(chunk_text: str, answer: str, window_sents: int = 3) -> str:
     """
     Ambil kalimat sekitar answer dari chunk agar model fokus ke topik yang benar.
@@ -646,14 +794,31 @@ def generate_question(context: str, answer: str, tokenizer, model) -> str:
 
 
 
-def build_choices(questions: list) -> list:
+def build_choices(questions: list) -> tuple:
     """
-    Bangun pilihan jawaban (1 benar + 3 distractor) per soal.
-    Prioritas 1: generate_misleading_distractors (tukar subj/ket definisi)
-    Prioritas 2: kalimat mirip dari chunk sama
-    Prioritas 3: jawaban soal lain
-    Prioritas 4: fallback statis
+    Bangun pilihan jawaban dengan arsitektur dua tahap via Groq Qwen3:
+
+    Tahap 1 — generate_answer_with_llm()
+        LLM generate jawaban benar berdasarkan pertanyaan + konteks dokumen.
+        'anchor' (pick_answer output) hanya dipakai sebagai petunjuk topik.
+
+    Tahap 2 — generate_distractors_with_llm()
+        LLM generate 3 distractor dengan kontras eksplisit ke jawaban benar.
+        Dua tahap terpisah agar distractor bisa dikontraskan dengan jawaban
+        konkret, bukan dengan anchor mentah dari teks.
+
+    Fix scoring bug: simpan correct_idx (index posisi jawaban benar di dalam
+    opts) bukan string, agar scoring tidak bergantung pada string matching.
+
+    Return:
+        choices_all  : list of list[str] — 4 opsi per soal (sudah diacak)
+        correct_all  : list[int]         — index jawaban benar di dalam opts
     """
+    # Cek API key di awal — tampilkan warning sekali kalau tidak ada
+    _, api_err = get_groq_client()
+    if api_err:
+        st.warning(f"⚠️ {api_err} — menggunakan metode rule-based sebagai fallback.")
+
     all_answers = list(set(
         q["pseudo_answer"].strip()
         for q in questions
@@ -664,37 +829,63 @@ def build_choices(questions: list) -> list:
         "Tidak ada jawaban yang tepat",
         "Informasi tidak disebutkan",
     ]
+
     choices_all = []
+    correct_all = []   # sekarang list[int] bukan list[str]
+
     for q in questions:
-        correct    = q["pseudo_answer"].strip()
+        anchor     = q["pseudo_answer"].strip()   # dari pick_answer(), bukan jawaban final
         chunk_text = q.get("context", "")
+        question   = q.get("question", "")
 
-        # Prioritas 1: distractor mirip (tukar subj/ket definisi)
-        distractors = generate_misleading_distractors(correct, chunk_text, n=3)
+        correct      = None
+        distractors  = None
+        llm_success  = False
 
-        # Prioritas 2: jawaban soal lain
-        if len(distractors) < 3:
-            pool = [a for a in all_answers
-                    if a.lower() != correct.lower() and a not in distractors]
-            random.shuffle(pool)
-            distractors += pool[:3 - len(distractors)]
+        # ── Tahap 1: Generate jawaban benar via LLM ──────────────────────
+        if api_err is None:
+            correct = generate_answer_with_llm(question, anchor, chunk_text)
 
-        # Prioritas 3: fallback
-        fb_idx = 0
+        # ── Tahap 2: Generate distractor via LLM ─────────────────────────
+        if correct is not None:
+            distractors = generate_distractors_with_llm(question, correct, chunk_text)
+            if distractors is not None and len(distractors) >= 1:
+                llm_success = True
+
+        # ── Fallback rule-based kalau LLM gagal di tahap manapun ─────────
+        if not llm_success:
+            correct     = anchor   # fallback ke anchor asli
+            distractors = generate_misleading_distractors(anchor, chunk_text, n=3)
+
+            if len(distractors) < 3:
+                pool = [a for a in all_answers
+                        if a.lower() != anchor.lower() and a not in distractors]
+                random.shuffle(pool)
+                distractors += pool[:3 - len(distractors)]
+
+            fb_idx = 0
+            while len(distractors) < 3:
+                distractors.append(fallbacks[fb_idx % len(fallbacks)])
+                fb_idx += 1
+
+        # Pastikan tepat 3 distractor (potong atau pad)
         while len(distractors) < 3:
-            distractors.append(fallbacks[fb_idx % len(fallbacks)])
-            fb_idx += 1
-
-        # Potong distractor yang terlalu panjang
+            distractors.append(fallbacks[len(distractors) % len(fallbacks)])
         distractors = [
             ' '.join(d.split()[:28]) if len(d.split()) > 28 else d
             for d in distractors[:3]
         ]
 
+        # ── Susun 4 opsi + simpan index jawaban benar ────────────────────
+        # Dengan menyimpan index, scoring 100% akurat — tidak perlu string matching.
         opts = distractors[:3] + [correct]
         random.shuffle(opts)
+        correct_idx = opts.index(correct)   # index 0-3, pasti ada
+
         choices_all.append(opts)
-    return choices_all
+        correct_all.append(correct_idx)
+
+    return choices_all, correct_all
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -702,15 +893,16 @@ def build_choices(questions: list) -> list:
 # ════════════════════════════════════════════════════════════════════════════
 
 defaults = {
-    "phase":        "upload",
-    "questions":    [],
-    "quiz_choices": [],
-    "quiz_idx":     0,
-    "quiz_answers": {},
-    "quiz_score":   0,
-    "raw_text":     "",
-    "file_name":    "",
-    "max_q":        8,
+    "phase":           "upload",
+    "questions":       [],
+    "quiz_choices":    [],
+    "quiz_correct":    [],   # jawaban benar versi LLM (diformulasikan ulang)
+    "quiz_idx":        0,
+    "quiz_answers":    {},
+    "quiz_score":      0,
+    "raw_text":        "",
+    "file_name":       "",
+    "max_q":           8,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -872,12 +1064,14 @@ elif st.session_state.phase == "generating":
         )
 
     pb.empty()
-    st.session_state.questions    = results
-    st.session_state.quiz_choices = build_choices(results)
-    st.session_state.quiz_idx     = 0
-    st.session_state.quiz_answers = {}
-    st.session_state.quiz_score   = 0
-    st.session_state.phase        = "popup"
+    choices_all, correct_all          = build_choices(results)
+    st.session_state.questions        = results
+    st.session_state.quiz_choices     = choices_all
+    st.session_state.quiz_correct     = correct_all
+    st.session_state.quiz_idx         = 0
+    st.session_state.quiz_answers     = {}
+    st.session_state.quiz_score       = 0
+    st.session_state.phase            = "popup"
     st.rerun()
 
 
@@ -886,6 +1080,30 @@ elif st.session_state.phase == "generating":
 # ════════════════════════════════════════════════════════════════════════════
 elif st.session_state.phase == "popup":
     n = len(st.session_state.questions)
+    max_requested  = st.session_state.max_q
+    chunk_limited  = n < max_requested
+
+    badge_html = f"""
+        <div style="display:inline-flex;align-items:center;gap:0.4rem;
+                    background:#EFF6FF;color:#2563A8;
+                    border:1.5px solid #DBEAFE;border-radius:99px;
+                    font-size:0.74rem;font-weight:700;padding:0.3rem 1.1rem;
+                    margin-bottom:{'0.6rem' if chunk_limited else '1.8rem'};
+                    letter-spacing:0.04em;">
+            ✦ &nbsp;{n} soal pilihan ganda berhasil di-generate
+        </div>
+    """
+    if chunk_limited:
+        badge_html += f"""
+        <div style="font-size:0.78rem;color:#B45309;background:#FFFBEB;
+                    border:1px solid #FDE68A;border-radius:10px;
+                    padding:0.55rem 1rem;margin-bottom:1.8rem;line-height:1.65;
+                    text-align:left;">
+            ⚠️ Kamu meminta <b>{max_requested} soal</b>, namun chunk materi yang
+            tersedia hanya cukup untuk menghasilkan <b>{n} soal</b>.
+            Coba upload materi yang lebih panjang untuk mendapatkan lebih banyak soal.
+        </div>
+        """
 
     st.markdown("""
     <style>
@@ -913,13 +1131,7 @@ elif st.session_state.phase == "popup":
                 Materi dari <b style="color:#1A2B45;">{st.session_state.file_name}</b><br>
                 berhasil diproses menjadi soal pilihan ganda.
             </p>
-            <div style="display:inline-flex;align-items:center;gap:0.4rem;
-                        background:#EFF6FF;color:#2563A8;
-                        border:1.5px solid #DBEAFE;border-radius:99px;
-                        font-size:0.74rem;font-weight:700;padding:0.3rem 1.1rem;
-                        margin-bottom:1.8rem;letter-spacing:0.04em;">
-                ✦ &nbsp;{n} soal pilihan ganda
-            </div>
+            {badge_html}
         </div>
         """, unsafe_allow_html=True)
 
@@ -943,6 +1155,7 @@ elif st.session_state.phase == "popup":
 elif st.session_state.phase == "quiz":
     questions   = st.session_state.questions
     choices_all = st.session_state.quiz_choices
+    correct_all = st.session_state.quiz_correct   # list[int] — index jawaban benar
     idx         = st.session_state.quiz_idx
     total       = len(questions)
 
@@ -950,9 +1163,11 @@ elif st.session_state.phase == "quiz":
         st.session_state.phase = "result"
         st.rerun()
 
-    q    = questions[idx]
-    opts = choices_all[idx]
-    pct  = idx / total * 100
+    q           = questions[idx]
+    opts        = choices_all[idx]
+    correct_idx = correct_all[idx]          # int: posisi jawaban benar di opts
+    correct_str = opts[correct_idx]         # string jawaban benar untuk ditampilkan
+    pct         = idx / total * 100
 
     st.markdown(f"""
     <div class="quiz-meta">
@@ -971,12 +1186,27 @@ elif st.session_state.phase == "quiz":
     </div>
     """, unsafe_allow_html=True)
 
-    selected = st.radio(
+    # Ambil pilihan sebelumnya kalau user balik ke soal ini
+    prev = st.session_state.quiz_answers.get(idx, {})
+    prev_selected = prev.get("selected") if isinstance(prev, dict) else None
+
+    _placeholder = ""               # sentinel string kosong — disembunyikan via CSS
+    radio_opts   = [_placeholder] + opts   # placeholder di index 0
+
+    if prev_selected and prev_selected in opts:
+        default_idx = radio_opts.index(prev_selected)
+    else:
+        default_idx = 0             # default ke placeholder (tidak ada yang terpilih)
+
+    raw_selected = st.radio(
         "Pilih jawaban:",
-        options=opts,
+        options=radio_opts,
+        index=default_idx,
         key=f"quiz_radio_{idx}",
         label_visibility="collapsed",
+        format_func=lambda x: x if x else "— Pilih jawaban —",
     )
+    selected = raw_selected if raw_selected else None
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -989,36 +1219,36 @@ elif st.session_state.phase == "quiz":
     with col_next:
         btn_label = "Selesai ✓" if idx == total - 1 else "Lanjut →"
         if st.button(btn_label, use_container_width=True, type="primary"):
-            st.session_state.quiz_answers[idx] = selected
-            # Gunakan fuzzy match untuk scoring — cek apakah selected mengandung
-            # pseudo_answer atau sebaliknya, bukan hanya exact match
-            # Ini fix kasus jawaban benar yang dipotong berbeda panjangnya
-            sel_low  = selected.strip().lower()
-            ans_low  = q["pseudo_answer"].strip().lower()
-            # Benar kalau: exact match, atau salah satu mengandung yang lain (≥60%)
-            is_correct = (
-                sel_low == ans_low
-                or (len(ans_low) > 20 and ans_low[:50] in sel_low)
-                or (len(sel_low) > 20 and sel_low[:50] in ans_low)
-            )
-            if is_correct:
-                st.session_state.quiz_score += 1
-            st.session_state.quiz_idx = idx + 1
-            if st.session_state.quiz_idx >= total:
-                st.session_state.phase = "result"
-            st.rerun()
+            if not selected:
+                st.warning("⚠️ Pilih salah satu jawaban dulu sebelum lanjut.")
+            else:
+                # Scoring via index — 100% akurat, tidak perlu string matching
+                selected_idx = opts.index(selected)
+                is_correct   = (selected_idx == correct_idx)
+                st.session_state.quiz_answers[idx] = {
+                    "selected": selected,
+                    "correct":  correct_str,
+                    "is_correct": is_correct,
+                }
+                if is_correct:
+                    st.session_state.quiz_score += 1
+                st.session_state.quiz_idx = idx + 1
+                if st.session_state.quiz_idx >= total:
+                    st.session_state.phase = "result"
+                st.rerun()
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # PHASE: RESULT
 # ════════════════════════════════════════════════════════════════════════════
 elif st.session_state.phase == "result":
-    questions = st.session_state.questions
-    answers   = st.session_state.quiz_answers
-    score     = st.session_state.quiz_score
-    total     = len(questions)
-    pct       = round(score / total * 100) if total else 0
-    grade     = "A" if pct >= 85 else "B" if pct >= 70 else "C" if pct >= 55 else "D"
+    questions   = st.session_state.questions
+    answers     = st.session_state.quiz_answers
+    correct_all = st.session_state.quiz_correct
+    score       = st.session_state.quiz_score
+    total       = len(questions)
+    pct         = round(score / total * 100) if total else 0
+    grade       = "A" if pct >= 85 else "B" if pct >= 70 else "C" if pct >= 55 else "D"
 
     st.markdown(f"""
     <div class="score-wrap">
@@ -1032,14 +1262,11 @@ elif st.session_state.phase == "result":
     st.markdown('<div class="sec-label">Rekap jawaban</div>', unsafe_allow_html=True)
 
     for i, q in enumerate(questions):
-        usr      = answers.get(i, "(tidak dijawab)")
-        sel_low  = usr.strip().lower()
-        ans_low  = q["pseudo_answer"].strip().lower()
-        is_ok    = (
-            sel_low == ans_low
-            or (len(ans_low) > 20 and ans_low[:50] in sel_low)
-            or (len(sel_low) > 20 and sel_low[:50] in ans_low)
-        )
+        ans_data = answers.get(i, {})
+        usr      = ans_data.get("selected", "(tidak dijawab)") if isinstance(ans_data, dict) else "(tidak dijawab)"
+        correct  = ans_data.get("correct", "-") if isinstance(ans_data, dict) else "-"
+        is_ok    = ans_data.get("is_correct", False) if isinstance(ans_data, dict) else False
+
         cls   = "correct" if is_ok else "wrong"
         icon  = "✓" if is_ok else "✕"
         color = "#0F7B55" if is_ok else "#B91C1C"
@@ -1049,6 +1276,9 @@ elif st.session_state.phase == "result":
                         color:{color};font-weight:700;margin-bottom:0.35rem;">{icon} Soal {i+1:02d}</div>
             <div class="result-q">{q['question']}</div>
             <div class="result-ans">Jawabanmu: <b>{usr}</b></div>
+            <div class="result-ans" style="margin-top:0.2rem;">
+                Jawaban benar: <b style="color:{color};">{correct}</b>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1059,7 +1289,9 @@ elif st.session_state.phase == "result":
             st.session_state.quiz_idx     = 0
             st.session_state.quiz_answers = {}
             st.session_state.quiz_score   = 0
-            st.session_state.quiz_choices = build_choices(questions)
+            choices_all, correct_all      = build_choices(questions)
+            st.session_state.quiz_choices = choices_all
+            st.session_state.quiz_correct = correct_all
             st.session_state.phase        = "quiz"
             st.rerun()
     with col2:
