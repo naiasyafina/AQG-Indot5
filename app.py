@@ -259,11 +259,52 @@ html, body, [class*="css"] {
 }
 
 /* ── RADIO ── */
-div[data-testid="stRadio"] > div > label * { color: var(--text-dark) !important; }
-div[data-testid="stRadio"] label           { color: var(--text-dark) !important; }
-div[data-testid="stRadio"] > label         { display:none !important; }
-div[data-testid="stRadio"] > div           { gap:9px !important; flex-direction:column !important; }
-div[data-testid="stRadio"] > div > label {
+/*
+   Fix alignment opsi kuis v2:
+   Masalahnya bukan panjang teks, tetapi wrapper bawaan Streamlit/BaseWeb
+   masih memakai lebar fit-content. Jadi yang dipaksa full width bukan hanya
+   label, tetapi juga element-container, radiogroup, dan wrapper radio-nya.
+*/
+
+/* Paksa container widget radio memenuhi lebar area utama */
+div[data-testid="stElementContainer"]:has(div[data-testid="stRadio"]),
+div.element-container:has(div[data-testid="stRadio"]),
+div[data-testid="stRadio"] {
+    width:100% !important;
+    max-width:100% !important;
+    min-width:100% !important;
+    box-sizing:border-box !important;
+}
+
+/* Sembunyikan label bawaan "Pilih jawaban:" */
+div[data-testid="stRadio"] > label {
+    display:none !important;
+}
+
+/* Paksa semua wrapper utama radio full width */
+div[data-testid="stRadio"] > div,
+div[data-testid="stRadio"] [role="radiogroup"],
+div[data-testid="stRadio"] [role="radiogroup"] > div,
+div[data-testid="stRadio"] [data-baseweb="radio"],
+div[data-testid="stRadio"] [data-baseweb="radio"] > div,
+div[data-testid="stRadio"] label {
+    width:100% !important;
+    max-width:100% !important;
+    box-sizing:border-box !important;
+}
+
+/* Radiogroup dibuat vertikal dan tiap item stretch */
+div[data-testid="stRadio"] [role="radiogroup"],
+div[data-testid="stRadio"] > div {
+    display:flex !important;
+    flex-direction:column !important;
+    align-items:stretch !important;
+    gap:9px !important;
+}
+
+/* Kotak putih opsi jawaban */
+div[data-testid="stRadio"] [role="radiogroup"] label,
+div[data-testid="stRadio"] [data-baseweb="radio"] {
     background:var(--bg-card) !important;
     border:1.5px solid var(--border) !important;
     border-radius:10px !important;
@@ -272,24 +313,54 @@ div[data-testid="stRadio"] > div > label {
     transition:border-color 0.15s, background 0.15s !important;
     color:var(--text-dark) !important;
     font-size:0.88rem !important;
-    width:100% !important;
     min-height:54px !important;
     display:flex !important;
     align-items:center !important;
+    justify-content:flex-start !important;
     box-sizing:border-box !important;
 }
-div[data-testid="stRadio"] > div > label:hover {
+
+/* Hover dan selected */
+div[data-testid="stRadio"] [role="radiogroup"] label:hover,
+div[data-testid="stRadio"] [data-baseweb="radio"]:hover {
     border-color:var(--blue-500) !important;
     background:var(--blue-50) !important;
 }
-div[data-testid="stRadio"] > div > label[data-checked="true"] {
+div[data-testid="stRadio"] [role="radiogroup"] label[data-checked="true"],
+div[data-testid="stRadio"] [data-baseweb="radio"][data-checked="true"],
+div[data-testid="stRadio"] label:has(input:checked) {
     border-color:var(--blue-700) !important;
     background:var(--blue-50) !important;
     color:var(--blue-700) !important;
     font-weight:600 !important;
 }
-/* Sembunyikan opsi placeholder (index 0 = string kosong) */
-div[data-testid="stRadio"] > div > label:first-child {
+
+/* Lingkaran radio jangan ikut melebar */
+div[data-testid="stRadio"] input,
+div[data-testid="stRadio"] [role="radio"],
+div[data-testid="stRadio"] label > div:first-child {
+    width:auto !important;
+    max-width:none !important;
+    min-width:auto !important;
+    flex:0 0 auto !important;
+}
+
+/* Teks jawaban mengisi sisa ruang dan wrap rapi */
+div[data-testid="stRadio"] label p,
+div[data-testid="stRadio"] [data-baseweb="radio"] p,
+div[data-testid="stRadio"] [role="radiogroup"] p {
+    color:var(--text-dark) !important;
+    white-space:normal !important;
+    line-height:1.55 !important;
+    margin:0 !important;
+    flex:1 1 auto !important;
+    min-width:0 !important;
+}
+
+/* Sembunyikan opsi placeholder kosong */
+div[data-testid="stRadio"] [role="radiogroup"] > label:first-child,
+div[data-testid="stRadio"] [role="radiogroup"] > div:first-child,
+div[data-testid="stRadio"] [data-baseweb="radio"]:first-child {
     display:none !important;
 }
 
